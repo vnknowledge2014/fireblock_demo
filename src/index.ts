@@ -1,127 +1,333 @@
 import { Hono } from 'hono';
-import { FireblocksSDK } from 'fireblocks-sdk';
-import { config } from 'dotenv';
-import fs from 'fs';
-import path from 'path';
+import { Effect, pipe } from 'effect';
+import { Fireblocks, BasePath } from "@fireblocks/ts-sdk";
 
-// Load environment variables
-config();
-
-// Initialize Fireblocks SDK
-const apiKey = process.env.FIREBLOCKS_API_KEY;
-const apiSecretPath = process.env.FIREBLOCKS_API_SECRET_PATH;
-
-if (!apiKey || !apiSecretPath) {
-  throw new Error('FIREBLOCKS_API_KEY and FIREBLOCKS_API_SECRET_PATH must be set in .env file');
+// =====================
+// Domain Models and Errors
+// =====================
+// Custom error types for better error handling
+class ConfigError extends Error {
+  readonly _tag = 'ConfigError';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigError';
+  }
 }
 
-let fireblocks;
-try {
-  const privateKey = fs.readFileSync(path.resolve(process.cwd(), apiSecretPath), 'utf8');
-  
-  // Validate private key format
-  if (!privateKey.includes('-----BEGIN PRIVATE KEY-----')) {
-    throw new Error('Invalid private key format');
+class PrivateKeyError extends Error {
+  readonly _tag = 'PrivateKeyError';
+  constructor(message: string) {
+    super(message);
+    this.name = 'PrivateKeyError';
   }
-  
-  console.log(`Initializing Fireblocks SDK with API Key: ${apiKey.substring(0, 8)}...`);
-  fireblocks = new FireblocksSDK(privateKey, apiKey);
-} catch (error) {
-  console.error('Error initializing Fireblocks SDK:', error);
-  throw new Error(`Failed to initialize Fireblocks SDK: ${error.message}`);
 }
 
-// Initialize Hono app
-const app = new Hono();
-
-// Root endpoint
-app.get('/', (c) => {
-  return c.json({ message: 'Fireblocks Demo API' });
-});
-
-// Get all vault accounts
-app.get('/api/vault-accounts', async (c) => {
-  try {
-    const vaultAccounts = await fireblocks.getVaultAccountsWithPageInfo({});
-    return c.json(vaultAccounts);
-  } catch (error) {
-    console.error('Error fetching vault accounts:', error);
-    // Check if it's an authentication error (401)
-    if (error.message && error.message.includes('401')) {
-      return c.json({ error: 'Authentication failed. Please check your API credentials.' }, 401);
-    }
-    return c.json({ error: 'Failed to fetch vault accounts' }, 500);
+class FireblocksApiError extends Error {
+  readonly _tag = 'FireblocksApiError';
+  readonly status: number;
+  
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'FireblocksApiError';
+    this.status = status;
   }
-});
+}
 
-// Get vault account by ID
-app.get('/api/vault-accounts/:vaultAccountId', async (c) => {
-  try {
-    const vaultAccountId = c.req.param('vaultAccountId');
-    const vaultAccount = await fireblocks.getVaultAccountById(vaultAccountId);
-    return c.json(vaultAccount);
-  } catch (error) {
-    console.error(`Error fetching vault account:`, error);
-    // Check if it's an authentication error (401)
-    if (error.message && error.message.includes('401')) {
-      return c.json({ error: 'Authentication failed. Please check your API credentials.' }, 401);
-    }
-    return c.json({ error: 'Failed to fetch vault account' }, 500);
+// Domain models
+interface Config {
+  readonly apiKey: string;
+  readonly secretPath: string;
+  readonly basePath?: string;
+}
+
+// =====================
+// Service Definitions (simple object approach)
+// =====================
+// Define service interfaces
+interface FireblocksService {
+  readonly client: Fireblocks;
+}
+
+interface AppEnv {
+  readonly fireblocks: FireblocksService;
+  readonly app: Hono;
+}
+
+// =====================
+// Pure Functions for Configuration
+// =====================
+// Get and validate config with better error handling
+const getConfig = Effect.gen(function* (_) {
+  const apiKey = process.env.FIREBLOCKS_API_KEY;
+  const secretPath = process.env.FIREBLOCKS_API_SECRET_PATH;
+  const basePath = process.env.FIREBLOCKS_BASE_PATH;
+  
+  if (!apiKey) {
+    yield* Effect.fail(new ConfigError('Missing FIREBLOCKS_API_KEY'));
   }
-});
-
-// Get vault assets
-app.get('/api/vault-accounts/:vaultAccountId/assets', async (c) => {
-  try {
-    const vaultAccountId = c.req.param('vaultAccountId');
-    const assets = await fireblocks.getVaultAccountAssets(vaultAccountId);
-    return c.json(assets);
-  } catch (error) {
-    console.error(`Error fetching vault assets:`, error);
-    // Check if it's an authentication error (401)
-    if (error.message && error.message.includes('401')) {
-      return c.json({ error: 'Authentication failed. Please check your API credentials.' }, 401);
-    }
-    return c.json({ error: 'Failed to fetch vault assets' }, 500);
+  
+  if (!secretPath) {
+    yield* Effect.fail(new ConfigError('Missing FIREBLOCKS_API_SECRET_PATH'));
   }
+  
+  return { apiKey, secretPath, basePath } as Config;
 });
 
-// Get supported assets
-app.get('/api/supported-assets', async (c) => {
-  try {
-    const assets = await fireblocks.getSupportedAssets();
-    return c.json(assets);
-  } catch (error) {
-    console.error('Error fetching supported assets:', error);
-    // Check if it's an authentication error (401)
-    if (error.message && error.message.includes('401')) {
-      return c.json({ error: 'Authentication failed. Please check your API credentials.' }, 401);
+// Read private key with proper error handling
+const readPrivateKey = (path: string) => 
+  pipe(
+    Effect.tryPromise({
+      try: () => Bun.file(path).text(),
+      catch: error => new PrivateKeyError(`Failed to read private key: ${error}`)
+    }),
+    Effect.flatMap(key => 
+      key.includes('-----BEGIN PRIVATE KEY-----')
+        ? Effect.succeed(key)
+        : Effect.fail(new PrivateKeyError('Invalid private key format'))
+    )
+  );
+
+// =====================
+// Service Creation Functions
+// =====================
+// Create Fireblocks service
+const createFireblocksService = (config: Config, privateKey: string): Effect.Effect<never, Error, FireblocksService> => 
+  Effect.try({
+    try: () => {
+      // Initialize the new Fireblocks SDK
+      const client = new Fireblocks({
+        apiKey: config.apiKey,
+        secretKey: privateKey,
+        basePath: config.basePath || BasePath.Sandbox
+      });
+      
+      const service: FireblocksService = {
+        client
+      };
+      
+      return service;
+    },
+    catch: error => new Error(`Failed to create Fireblocks service: ${error}`)
+  });
+
+// Helper function to wrap Fireblocks API calls with proper error handling
+const wrapFireblocksCall = <T>(fn: () => Promise<T>) => 
+  Effect.tryPromise({
+    try: fn,
+    catch: error => {
+      if (error.message?.includes('401')) {
+        return new FireblocksApiError('Authentication failed', 401);
+      }
+      return new FireblocksApiError(`API error: ${error.message}`, 500);
     }
-    return c.json({ error: 'Failed to fetch supported assets' }, 500);
-  }
+  });
+
+// Create a Hono app
+const createApp = Effect.sync(() => new Hono());
+
+// Combine to create the full environment
+const createAppEnv = Effect.gen(function* (_) {
+  // Get configuration
+  const config = yield* getConfig;
+  
+  // Read the private key
+  const privateKey = yield* readPrivateKey(config.secretPath);
+  
+  // Create the services
+  const fireblocks = yield* createFireblocksService(config, privateKey);
+  const app = yield* createApp;
+  
+  // Return the combined environment
+  return { fireblocks, app };
 });
 
-// Get transactions
-app.get('/api/transactions', async (c) => {
-  try {
-    const transactions = await fireblocks.getTransactions();
-    return c.json(transactions);
-  } catch (error) {
-    console.error('Error fetching transactions:', error);
-    // Check if it's an authentication error (401)
-    if (error.message && error.message.includes('401')) {
-      return c.json({ error: 'Authentication failed. Please check your API credentials.' }, 401);
-    }
-    return c.json({ error: 'Failed to fetch transactions' }, 500);
-  }
-});
+// =====================
+// Route Handlers
+// =====================
+// Root endpoint handler
+const handleRoot = ({ app }: AppEnv) => 
+  Effect.sync(() => {
+    app.get('/', (c) => c.json({ message: 'Fireblocks Demo API' }));
+    return app;
+  });
 
-// Start the server
-const port = process.env.PORT || 3000;
+// Get vault accounts handler
+const handleVaultAccounts = ({ app, fireblocks }: AppEnv) => 
+  Effect.sync(() => {
+    app.get('/api/vault-accounts', async (c) => {
+      const result = await Effect.runPromise(
+        wrapFireblocksCall(() => fireblocks.client.vaults.getPagedVaultAccounts({}))
+          .pipe(
+            Effect.match({
+              onFailure: (error: FireblocksApiError) => {
+                console.error('Error fetching vault accounts:', error);
+                return c.json({ error: error.message }, error.status || 500);
+              },
+              onSuccess: (vaultAccounts) => c.json(vaultAccounts)
+            })
+          )
+      );
+      return result;
+    });
+    
+    return app;
+  });
 
-console.log(`Server is running on http://localhost:${port}`);
+// Get vault account by ID handler
+const handleVaultAccountById = ({ app, fireblocks }: AppEnv) => 
+  Effect.sync(() => {
+    app.get('/api/vault-accounts/:vaultAccountId', async (c) => {
+      const vaultAccountId = c.req.param('vaultAccountId');
+      
+      const result = await Effect.runPromise(
+        wrapFireblocksCall(() => fireblocks.client.vaults.getVaultAccount({ vaultAccountId }))
+          .pipe(
+            Effect.match({
+              onFailure: (error: FireblocksApiError) => {
+                console.error(`Error fetching vault account:`, error);
+                return c.json({ error: error.message }, error.status || 500);
+              },
+              onSuccess: (vaultAccount) => c.json(vaultAccount)
+            })
+          )
+      );
+      
+      return result;
+    });
+    
+    return app;
+  });
 
+// Get vault assets handler
+const handleVaultAssets = ({ app, fireblocks }: AppEnv) => 
+  Effect.sync(() => {
+    app.get('/api/vault-accounts/:vaultAccountId/:assetId', async (c) => {
+      const vaultAccountId = c.req.param('vaultAccountId');
+      const assetId = c.req.param('assetId');
+
+      if (!vaultAccountId) {
+        return c.json({ error: 'Vault account ID is required' }, 400);
+      }
+      
+      const result = await Effect.runPromise(
+        wrapFireblocksCall(() => fireblocks.client.vaults.getVaultAccountAsset({ vaultAccountId, assetId }))
+          .pipe(
+            Effect.match({
+              onFailure: (error: FireblocksApiError) => {
+                console.error(`Error fetching vault assets:`, error);
+                return c.json({ error: error.message }, error.status || 500);
+              },
+              onSuccess: (assets) => c.json(assets)
+            })
+          )
+      );
+      
+      return result;
+    });
+    
+    return app;
+  });
+
+// Get supported assets handler
+const handleSupportedAssets = ({ app, fireblocks }: AppEnv) => 
+  Effect.sync(() => {
+    app.get('/api/supported-assets', async (c) => {
+      const result = await Effect.runPromise(
+        wrapFireblocksCall(() => fireblocks.client.blockchainsAssets.getSupportedAssets())
+          .pipe(
+            Effect.match({
+              onFailure: (error: FireblocksApiError) => {
+                console.error('Error fetching supported assets:', error);
+                return c.json({ error: error.message }, error.status || 500);
+              },
+              onSuccess: (assets) => c.json(assets)
+            })
+          )
+      );
+      
+      return result;
+    });
+    
+    return app;
+  });
+
+// Get transactions handler
+const handleTransactions = ({ app, fireblocks }: AppEnv) => 
+  Effect.sync(() => {
+    app.get('/api/transactions', async (c) => {
+      const result = await Effect.runPromise(
+        wrapFireblocksCall(() => fireblocks.client.transactions.getTransactions({}))
+          .pipe(
+            Effect.match({
+              onFailure: (error: FireblocksApiError) => {
+                console.error('Error fetching transactions:', error);
+                return c.json({ error: error.message }, error.status || 500);
+              },
+              onSuccess: (transactions) => c.json(transactions)
+            })
+          )
+      );
+      
+      return result;
+    });
+    
+    return app;
+  });
+
+// =====================
+// App Setup
+// =====================
+// Compose all route handlers using pipe
+const setupApp = pipe(
+  createAppEnv,
+  Effect.flatMap(env => 
+    pipe(
+      handleRoot(env),
+      Effect.flatMap(() => handleVaultAccounts(env)),
+      Effect.flatMap(() => handleVaultAccountById(env)),
+      Effect.flatMap(() => handleVaultAssets(env)),
+      Effect.flatMap(() => handleSupportedAssets(env)),
+      Effect.flatMap(() => handleTransactions(env)),
+      Effect.map(() => env.app)
+    )
+  ),
+  Effect.catchAll(error => {
+    console.error('Application setup failed:', error);
+    return Effect.sync(() => {
+      const fallbackApp = new Hono();
+      fallbackApp.all('*', (c) => c.json({ error: 'Server configuration error' }, 500));
+      return fallbackApp;
+    });
+  })
+);
+
+// =====================
+// Application Startup
+// =====================
+// Run the main effect to start the server
+const port = Number(process.env.PORT) || 3000;
+
+// Export for Bun
 export default {
   port,
-  fetch: app.fetch,
+  fetch: async (request: Request) => {
+    try {
+      // We create a static app instance to avoid recreating it on every request
+      const app = await Effect.runPromise(setupApp);
+      return app.fetch(request);
+    } catch (error) {
+      console.error("Error handling request:", error);
+      const fallbackApp = new Hono();
+      fallbackApp.all('*', (c) => c.json({ error: 'Server error' }, 500));
+      return fallbackApp.fetch(request);
+    }
+  }
 };
+
+// Start the server
+Effect.runPromise(setupApp).then(app => {
+  console.log(`Server running on http://localhost:${port}`);
+}).catch(error => {
+  console.error('Failed to start server:', error);
+  process.exit(1);
+});

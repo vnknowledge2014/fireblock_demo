@@ -9,13 +9,16 @@
     "start": "bun run dist/index.js"
   },
   "dependencies": {
+    "@effect/platform": "^0.80.11",
+    "@fireblocks/ts-sdk": "^10.0.2",
     "dotenv": "^16.3.1",
-    "fireblocks-sdk": "^5.9.0",
+    "effect": "^3.14.11",
     "hono": "^3.5.0"
   },
   "devDependencies": {
     "@types/node": "^20.5.0",
     "bun-types": "latest",
+    "newman": "^6.2.1",
     "typescript": "^5.1.6"
   }
 }
