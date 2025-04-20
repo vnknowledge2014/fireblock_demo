@@ -1,0 +1,21 @@
+{
+  "name": "fireblocks-demo",
+  "version": "1.0.0",
+  "description": "Demo API kết nối với Fireblocks",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "build": "bun build src/index.ts --outdir ./dist",
+    "start": "bun run dist/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "fireblocks-sdk": "^5.9.0",
+    "hono": "^3.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.5.0",
+    "bun-types": "latest",
+    "typescript": "^5.1.6"
+  }
+}

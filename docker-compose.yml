@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  fireblocks-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - FIREBLOCKS_API_KEY=${FIREBLOCKS_API_KEY}
+      - FIREBLOCKS_API_SECRET_PATH=/app/fireblocks_secret.key
+    volumes:
+      - ./fireblocks_secret.key:/app/fireblocks_secret.key:ro
+    restart: unless-stopped
