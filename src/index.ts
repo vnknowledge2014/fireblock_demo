@@ -5,7 +5,6 @@ import { Fireblocks, BasePath } from "@fireblocks/ts-sdk";
 // =====================
 // Domain Models and Errors
 // =====================
-// Custom error types for better error handling
 class ConfigError extends Error {
   readonly _tag = 'ConfigError';
   constructor(message: string) {
@@ -25,7 +24,6 @@ class PrivateKeyError extends Error {
 class FireblocksApiError extends Error {
   readonly _tag = 'FireblocksApiError';
   readonly status: number;
-  
   constructor(message: string, status: number) {
     super(message);
     this.name = 'FireblocksApiError';
@@ -41,7 +39,6 @@ class CryptoMarketDataError extends Error {
   }
 }
 
-// Domain models
 interface Config {
   readonly apiKey: string;
   readonly secretPath: string;
@@ -49,19 +46,17 @@ interface Config {
   readonly cryptoMarketDataApi: string;
 }
 
-// Interface cho dữ liệu giá tiền điện tử
 interface CryptoPrice {
-  [currency: string]: number; // e.g., { "USD": 50000, "EUR": 45000, "AUD": 70000 }
+  [currency: string]: number;
 }
 
 interface CryptoPrices {
-  [symbol: string]: CryptoPrice; // e.g., { "BTC": {...}, "ETH": {...} }
+  [symbol: string]: CryptoPrice;
 }
 
 // =====================
 // Service Definitions
 // =====================
-// Define service interfaces
 interface FireblocksService {
   readonly client: Fireblocks;
 }
@@ -79,29 +74,19 @@ interface AppEnv {
 // =====================
 // Pure Functions for Configuration
 // =====================
-// Get and validate config with better error handling
 const getConfig = Effect.gen(function* (_) {
   const apiKey = process.env.FIREBLOCKS_API_KEY;
   const secretPath = process.env.FIREBLOCKS_API_SECRET_PATH;
   const basePath = process.env.FIREBLOCKS_API_BASE_URL;
   const cryptoMarketDataApi = process.env.CRYPTO_MARKET_DATA_API;
-  
-  if (!apiKey) {
-    yield* Effect.fail(new ConfigError('Missing FIREBLOCKS_API_KEY'));
-  }
-  
-  if (!secretPath) {
-    yield* Effect.fail(new ConfigError('Missing FIREBLOCKS_API_SECRET_PATH'));
-  }
-  
-  if (!cryptoMarketDataApi) {
-    yield* Effect.fail(new ConfigError('Missing CRYPTO_MARKET_DATA_API'));
-  }
-  
+
+  if (!apiKey) yield* Effect.fail(new ConfigError('Missing FIREBLOCKS_API_KEY'));
+  if (!secretPath) yield* Effect.fail(new ConfigError('Missing FIREBLOCKS_API_SECRET_PATH'));
+  if (!cryptoMarketDataApi) yield* Effect.fail(new ConfigError('Missing CRYPTO_MARKET_DATA_API'));
+
   return { apiKey, secretPath, basePath, cryptoMarketDataApi } as Config;
 });
 
-// Read private key with proper error handling
 const readPrivateKey = (path: string) => 
   pipe(
     Effect.tryPromise({
@@ -118,27 +103,31 @@ const readPrivateKey = (path: string) =>
 // =====================
 // Service Creation Functions
 // =====================
-// Create Fireblocks service
 const createFireblocksService = (config: Config, privateKey: string): Effect.Effect<never, Error, FireblocksService> => 
   Effect.try({
     try: () => {
-      // Initialize the new Fireblocks SDK
+      console.info({
+        level: 'info',
+        message: 'Initializing Fireblocks client',
+        apiKey: '***',
+        basePath: config.basePath
+      });
+      
       const client = new Fireblocks({
         apiKey: config.apiKey,
         secretKey: privateKey,
         basePath: config.basePath || BasePath.Sandbox
       });
       
-      const service: FireblocksService = {
-        client
-      };
-      
-      return service;
+      console.info({ level: 'info', message: 'Fireblocks client initialized successfully' });
+      return { client };
     },
-    catch: error => new Error(`Failed to create Fireblocks service: ${error}`)
+    catch: error => {
+      console.error({ level: 'error', message: 'Fireblocks initialization failed', error: error.message });
+      return new Error(`Failed to create Fireblocks service: ${error}`);
+    }
   });
 
-// Tạo service CryptoMarketData
 const createCryptoMarketDataService = (config: Config): Effect.Effect<never, Error, CryptoMarketDataService> => 
   Effect.try({
     try: () => {
@@ -152,32 +141,35 @@ const createCryptoMarketDataService = (config: Config): Effect.Effect<never, Err
                 tsyms: currencies.join(',')
               }).toString();
               
-              console.log(`Fetching prices for symbols: ${symbols.join(',')} in currencies: ${currencies.join(',')}`);
-              console.log(`URL: ${url.toString()}`);
-              
+              console.debug({
+                level: 'debug',
+                message: 'Fetching crypto prices',
+                symbols: symbols.join(','),
+                currencies: currencies.join(','),
+                url: url.toString()
+              });
+
               const response = await fetch(url, {
                 method: 'GET',
                 headers: { "Content-type": "application/json; charset=UTF-8" }
               });
-              
+
               if (!response.ok) {
-                throw new Error(`Failed to fetch crypto prices: ${response.statusText}`);
+                throw new Error(`HTTP error! Status: ${response.status}`);
               }
-              
+
               const data = await response.json();
-              console.log('Price data response:', data);
+              console.debug({ level: 'debug', message: 'Received price data', data });
               return data;
             },
             catch: error => new CryptoMarketDataError(`Crypto market data error: ${error}`)
           })
       };
-      
       return service;
     },
     catch: error => new Error(`Failed to create crypto market data service: ${error}`)
   });
 
-// Helper function to wrap Fireblocks API calls with proper error handling
 const wrapFireblocksCall = <T>(fn: () => Promise<T>) => 
   Effect.tryPromise({
     try: fn,
@@ -189,146 +181,61 @@ const wrapFireblocksCall = <T>(fn: () => Promise<T>) =>
     }
   });
 
-// Create a Hono app
-const createApp = Effect.sync(() => new Hono());
+// Middleware logging
+const createApp = Effect.sync(() => {
+  const app = new Hono();
+  
+  app.use('*', async (c, next) => {
+    const start = Date.now();
+    await next();
+    const latency = Date.now() - start;
+    
+    console.info({
+      level: 'info',
+      method: c.req.method,
+      path: c.req.path,
+      status: c.res.status,
+      latency: `${latency}ms`,
+      timestamp: new Date().toISOString()
+    });
+  });
 
-// Combine to create the full environment
-const createAppEnv = Effect.gen(function* (_) {
-  // Get configuration
-  const config = yield* getConfig;
-  
-  // Read the private key
-  const privateKey = yield* readPrivateKey(config.secretPath);
-  
-  // Create the services
-  const fireblocks = yield* createFireblocksService(config, privateKey);
-  const cryptoMarketData = yield* createCryptoMarketDataService(config);
-  const app = yield* createApp;
-  
-  // Return the combined environment
-  return { fireblocks, cryptoMarketData, app };
+  return app;
 });
 
 // =====================
 // Route Handlers
 // =====================
-// Root endpoint handler
 const handleRoot = ({ app }: AppEnv) => 
   Effect.sync(() => {
-    app.get('/', (c) => c.json({ message: 'Fireblocks Demo API' }));
+    app.get('/', (c) => {
+      console.info({ level: 'info', message: 'Handling root request' });
+      return c.json({ message: 'Fireblocks Demo API' });
+    });
     return app;
   });
 
-// Get vault accounts handler
 const handleVaultAccounts = ({ app, fireblocks, cryptoMarketData }: AppEnv) => 
   Effect.sync(() => {
     app.get('/api/vault-accounts', async (c) => {
+      console.info({ level: 'info', message: 'Handling /api/vault-accounts request' });
       try {
         const vaultAccountsResponse = await fireblocks.client.vaults.getPagedVaultAccounts({});
         
-        // If the response has the expected structure with data.accounts
-        if (vaultAccountsResponse && vaultAccountsResponse.data && Array.isArray(vaultAccountsResponse.data.accounts)) {
-          // Process each account
+        if (vaultAccountsResponse?.data?.accounts) {
           for (const account of vaultAccountsResponse.data.accounts) {
-            if (Array.isArray(account.assets)) {
-              // Get unique crypto symbols
-              const symbols = [...new Set(account.assets.map(asset => {
-                const parts = asset.id?.split('_') || [];
-                return parts[0] || '';
-              }))].filter(Boolean);
-              
-              // Get price data
-              let prices = {};
-              if (symbols.length > 0) {
-                try {
-                  prices = await Effect.runPromise(
-                    cryptoMarketData.getPrices(symbols, ['USD', 'AUD'])
-                  );
-                } catch (error) {
-                  console.error('Error fetching prices:', error);
-                }
-              }
-              
-              // Add price data to each asset
-              account.assets = account.assets.map(asset => {
-                const symbol = (asset.id?.split('_')[0]) || '';
-                const priceData = symbol ? prices[symbol] : null;
-                const balance = parseFloat(asset.available || "0");
-                
-                return {
-                  ...asset,
-                  unitPrice: priceData || { USD: null, AUD: null },
-                  calculatedValues: {
-                    USD: priceData?.USD ? balance * priceData.USD : null,
-                    AUD: priceData?.AUD ? balance * priceData.AUD : null
-                  }
-                };
-              });
-              
-              // Calculate total value for all assets in this account
-              const totalBalances = account.assets.reduce((acc, asset) => {
-                if (asset.calculatedValues?.USD && !isNaN(asset.calculatedValues.USD)) {
-                  acc.USD += asset.calculatedValues.USD;
-                }
-                if (asset.calculatedValues?.AUD && !isNaN(asset.calculatedValues.AUD)) {
-                  acc.AUD += asset.calculatedValues.AUD;
-                }
-                return acc;
-              }, { USD: 0, AUD: 0 });
-              
-              // Add assetBalances at the same level as id
-              account.assetBalances = totalBalances;
-            }
-          }
-        }
-        
-        return c.json(vaultAccountsResponse);
-      } catch (error) {
-        console.error('Error fetching vault accounts:', error);
-        const statusCode = error.status || 500;
-        return c.json({ 
-          error: error.message || 'Error fetching vault accounts', 
-          status: statusCode 
-        }, statusCode);
-      }
-    });
-    
-    return app;
-  });
-
-// Get vault account by ID handler
-const handleVaultAccountById = ({ app, fireblocks, cryptoMarketData }: AppEnv) => 
-  Effect.sync(() => {
-    app.get('/api/vault-accounts/:vaultAccountId', async (c) => {
-      const vaultAccountId = c.req.param('vaultAccountId');
-      
-      try {
-        const vaultAccount = await fireblocks.client.vaults.getVaultAccount({ vaultAccountId });
-        
-        // Kiểm tra xem vaultAccount.data.assets có tồn tại không
-        if (vaultAccount.data && Array.isArray(vaultAccount.data.assets)) {
-          try {
-            // Lấy các ký hiệu tiền điện tử duy nhất từ mảng assets
-            const symbols = [...new Set(vaultAccount.data.assets.map(asset => {
-              const parts = asset.id?.split('_') || [];
-              return parts[0] || '';
-            }))].filter(Boolean);
+            const symbols = [...new Set(account.assets?.map(asset => 
+              asset.id?.split('_')[0] || ''
+            ))].filter(Boolean);
             
-            // Lấy thông tin giá
             let prices = {};
-            try {
-              if (symbols.length > 0) {
-                prices = await Effect.runPromise(
-                  cryptoMarketData.getPrices(symbols, ['USD', 'AUD'])
-                );
-              }
-            } catch (error) {
-              console.error('Error fetching prices:', error);
+            if (symbols.length > 0) {
+              console.debug({ level: 'debug', message: 'Fetching prices for account processing', symbols });
+              prices = await Effect.runPromise(cryptoMarketData.getPrices(symbols, ['USD', 'AUD']));
             }
             
-            // Thêm thông tin giá và tính giá trị quy đổi vào từng asset
-            vaultAccount.data.assets = vaultAccount.data.assets.map(asset => {
-              const symbol = (asset.id?.split('_')[0]) || '';
+            account.assets = account.assets?.map(asset => {
+              const symbol = asset.id?.split('_')[0] || '';
               const priceData = symbol ? prices[symbol] : null;
               const balance = parseFloat(asset.available || "0");
               
@@ -340,310 +247,273 @@ const handleVaultAccountById = ({ app, fireblocks, cryptoMarketData }: AppEnv) =
                   AUD: priceData?.AUD ? balance * priceData.AUD : null
                 }
               };
-            });
+            }) || [];
             
-            // Tính tổng giá trị của tất cả tài sản
-            const totalBalances = vaultAccount.data.assets.reduce((acc, asset) => {
-              if (asset.calculatedValues.USD && !isNaN(asset.calculatedValues.USD)) {
-                acc.USD += asset.calculatedValues.USD;
-              }
-              if (asset.calculatedValues.AUD && !isNaN(asset.calculatedValues.AUD)) {
-                acc.AUD += asset.calculatedValues.AUD;
-              }
-              return acc;
-            }, { USD: 0, AUD: 0 });
-            
-            // Thêm tổng giá trị vào vaultAccount
-            vaultAccount.data.assetBalances = totalBalances;
-          } catch (error) {
-            console.error(`Error processing assets for vault ${vaultAccountId}:`, error);
+            account.assetBalances = account.assets.reduce((acc, asset) => ({
+              USD: (acc.USD || 0) + (asset.calculatedValues?.USD || 0),
+              AUD: (acc.AUD || 0) + (asset.calculatedValues?.AUD || 0)
+            }), { USD: 0, AUD: 0 });
           }
+        }
+        
+        return c.json(vaultAccountsResponse);
+      } catch (error) {
+        console.error({
+          level: 'error',
+          message: 'Error in /api/vault-accounts',
+          error: error.message,
+          stack: error.stack
+        });
+        const statusCode = error.status || 500;
+        return c.json({ error: error.message, status: statusCode }, statusCode);
+      }
+    });
+    return app;
+  });
+
+const handleVaultAccountById = ({ app, fireblocks, cryptoMarketData }: AppEnv) => 
+  Effect.sync(() => {
+    app.get('/api/vault-accounts/:vaultAccountId', async (c) => {
+      const vaultAccountId = c.req.param('vaultAccountId');
+      console.info({ level: 'info', message: `Handling /api/vault-accounts/${vaultAccountId} request` });
+      
+      try {
+        const vaultAccount = await fireblocks.client.vaults.getVaultAccount({ vaultAccountId });
+        
+        if (vaultAccount.data?.assets) {
+          const symbols = [...new Set(vaultAccount.data.assets.map(asset => 
+            asset.id?.split('_')[0] || ''
+          ))].filter(Boolean);
+          
+          let prices = {};
+          if (symbols.length > 0) {
+            console.debug({ level: 'debug', message: 'Fetching prices for vault account', symbols });
+            prices = await Effect.runPromise(cryptoMarketData.getPrices(symbols, ['USD', 'AUD']));
+          }
+          
+          vaultAccount.data.assets = vaultAccount.data.assets.map(asset => {
+            const symbol = asset.id?.split('_')[0] || '';
+            const priceData = prices[symbol] || { USD: null, AUD: null };
+            const balance = parseFloat(asset.available || "0");
+            
+            return {
+              ...asset,
+              unitPrice: priceData,
+              calculatedValues: {
+                USD: priceData.USD ? balance * priceData.USD : null,
+                AUD: priceData.AUD ? balance * priceData.AUD : null
+              }
+            };
+          });
+          
+          vaultAccount.data.assetBalances = vaultAccount.data.assets.reduce((acc, asset) => ({
+            USD: (acc.USD || 0) + (asset.calculatedValues?.USD || 0),
+            AUD: (acc.AUD || 0) + (asset.calculatedValues?.AUD || 0)
+          }), { USD: 0, AUD: 0 });
         }
         
         return c.json(vaultAccount);
       } catch (error) {
-        console.error(`Error fetching vault account:`, error);
+        console.error({
+          level: 'error',
+          message: `Error in /api/vault-accounts/${vaultAccountId}`,
+          error: error.message,
+          stack: error.stack
+        });
         const statusCode = error.status || 500;
-        return c.json({ 
-          error: error.message || 'Error fetching vault account', 
-          status: statusCode 
-        }, statusCode);
+        return c.json({ error: error.message, status: statusCode }, statusCode);
       }
     });
-    
     return app;
   });
 
-// Get all vault assets for an account with price data
 const handleVaultAccountAssets = ({ app, fireblocks, cryptoMarketData }: AppEnv) => 
   Effect.sync(() => {
     app.get('/api/vault-accounts/:vaultAccountId/assets', async (c) => {
       const vaultAccountId = c.req.param('vaultAccountId');
-
+      console.info({ level: 'info', message: `Handling /api/vault-accounts/${vaultAccountId}/assets request` });
+      
       if (!vaultAccountId) {
-        return c.json({ 
-          error: 'Vault account ID is required', 
-          status: 400 
-        }, 400);
+        return c.json({ error: 'Vault account ID is required', status: 400 }, 400);
       }
       
       try {
         const assetsResponse = await fireblocks.client.vaults.getVaultAccountAssetsByVaultAccountId({ vaultAccountId });
-        
-        // Đảm bảo assetsResponse là mảng
         const assets = Array.isArray(assetsResponse) ? assetsResponse : [];
         
         if (assets.length === 0) {
           return c.json([]);
         }
         
-        // Extract unique symbols from all assets
-        const symbols = [...new Set(assets.map(asset => {
-          const parts = asset.id?.split('_') || [];
-          return parts[0] || ''; 
-        }))].filter(Boolean);
+        const symbols = [...new Set(assets.map(asset => 
+          asset.id?.split('_')[0] || ''
+        ))].filter(Boolean);
         
-        // Lấy thông tin giá
         let prices = {};
-        try {
-          if (symbols.length > 0) {
-            prices = await Effect.runPromise(
-              cryptoMarketData.getPrices(symbols, ['USD', 'AUD'])
-            );
-          }
-        } catch (error) {
-          console.error('Error fetching prices:', error);
+        if (symbols.length > 0) {
+          console.debug({ level: 'debug', message: 'Fetching prices for assets', symbols });
+          prices = await Effect.runPromise(cryptoMarketData.getPrices(symbols, ['USD', 'AUD']));
         }
         
-        // Enhance each asset with price data
         const assetsWithPrices = assets.map(asset => {
-          const symbol = (asset.id?.split('_')[0]) || '';
-          const priceData = symbol ? prices[symbol] : null;
+          const symbol = asset.id?.split('_')[0] || '';
+          const priceData = prices[symbol] || { USD: null, AUD: null };
           const balance = parseFloat(asset.available || "0");
           
-          if (asset.data) {
-            // Nếu asset có cấu trúc data
-            return {
-              ...asset,
-              data: {
-                ...asset.data,
-                unitPrice: priceData || { USD: null, AUD: null },
-                calculatedValues: {
-                  USD: priceData?.USD ? balance * priceData.USD : null,
-                  AUD: priceData?.AUD ? balance * priceData.AUD : null
-                }
-              }
-            };
-          } else {
-            // Nếu asset không có cấu trúc data
-            return {
-              ...asset,
-              unitPrice: priceData || { USD: null, AUD: null },
-              calculatedValues: {
-                USD: priceData?.USD ? balance * priceData.USD : null,
-                AUD: priceData?.AUD ? balance * priceData.AUD : null
-              }
-            };
-          }
+          return {
+            ...asset,
+            unitPrice: priceData,
+            calculatedValues: {
+              USD: priceData.USD ? balance * priceData.USD : null,
+              AUD: priceData.AUD ? balance * priceData.AUD : null
+            }
+          };
         });
         
         return c.json(assetsWithPrices);
       } catch (error) {
-        console.error(`Error fetching vault assets:`, error);
+        console.error({
+          level: 'error',
+          message: `Error in /api/vault-accounts/${vaultAccountId}/assets`,
+          error: error.message,
+          stack: error.stack
+        });
         const statusCode = error.status || 500;
-        return c.json({ 
-          error: error.message || 'Error fetching assets', 
-          status: statusCode 
-        }, statusCode);
+        return c.json({ error: error.message, status: statusCode }, statusCode);
       }
     });
-    
     return app;
   });
 
-// Get vault asset by ID with price data
 const handleVaultAssets = ({ app, fireblocks, cryptoMarketData }: AppEnv) => 
   Effect.sync(() => {
     app.get('/api/vault-accounts/:vaultAccountId/:assetId', async (c) => {
       const vaultAccountId = c.req.param('vaultAccountId');
       const assetId = c.req.param('assetId');
-
+      console.info({ 
+        level: 'info', 
+        message: `Handling /api/vault-accounts/${vaultAccountId}/${assetId} request`
+      });
+      
       if (!vaultAccountId) {
-        return c.json({ 
-          error: 'Vault account ID is required', 
-          status: 400 
-        }, 400);
+        return c.json({ error: 'Vault account ID is required', status: 400 }, 400);
       }
       
       try {
-        // Lấy dữ liệu tài sản
         const assetResponse = await fireblocks.client.vaults.getVaultAccountAsset({ 
           vaultAccountId, 
           assetId 
         });
         
-        // Lấy thông tin giá
         const symbol = assetId.split('_')[0];
         let priceData = null;
-        
         try {
           const prices = await Effect.runPromise(
             cryptoMarketData.getPrices([symbol], ['USD', 'AUD'])
           );
           priceData = prices[symbol];
-          console.log("Price data for", symbol, ":", priceData);
+          console.debug({ level: 'debug', message: 'Price data retrieved', symbol, priceData });
         } catch (error) {
-          console.error('Error fetching price data:', error);
+          console.error({ level: 'warn', message: 'Price fetch failed', symbol, error: error.message });
         }
         
-        // Kiểm tra cấu trúc dữ liệu và trích xuất balance
-        let balance = 0;
-        if (assetResponse.data && assetResponse.data.available) {
-          balance = parseFloat(assetResponse.data.available);
-        } else if (assetResponse.available) {
-          balance = parseFloat(assetResponse.available);
-        }
-        
-        console.log("Balance:", balance, "Type:", typeof balance);
-        
-        // Tính toán giá trị
+        const balance = parseFloat(assetResponse.available || "0");
         const calculatedUSD = priceData?.USD ? balance * priceData.USD : null;
         const calculatedAUD = priceData?.AUD ? balance * priceData.AUD : null;
         
-        console.log("Calculated values - USD:", calculatedUSD, "AUD:", calculatedAUD);
-        
-        // Thêm thông tin giá và giá trị tính toán vào đúng vị trí
-        let responseData;
-        
-        if (assetResponse.data) {
-          responseData = {
-            ...assetResponse,
-            data: {
-              ...assetResponse.data,
-              unitPrice: priceData || { USD: null, AUD: null },
-              calculatedValues: {
-                USD: calculatedUSD,
-                AUD: calculatedAUD
-              }
-            }
-          };
-        } else {
-          responseData = {
-            ...assetResponse,
-            unitPrice: priceData || { USD: null, AUD: null },
-            calculatedValues: {
-              USD: calculatedUSD,
-              AUD: calculatedAUD
-            }
-          };
-        }
+        const responseData = {
+          ...assetResponse,
+          unitPrice: priceData || { USD: null, AUD: null },
+          calculatedValues: {
+            USD: calculatedUSD,
+            AUD: calculatedAUD
+          }
+        };
         
         return c.json(responseData);
       } catch (error) {
-        console.error(`Error processing vault asset:`, error);
+        console.error({
+          level: 'error',
+          message: `Error in /api/vault-accounts/${vaultAccountId}/${assetId}`,
+          error: error.message,
+          stack: error.stack
+        });
         
-        // Check for specific errors and provide appropriate message
-        if (error.message && (
-            error.message.includes("not found") || 
-            error.message.includes("not supported") ||
-            error.message.includes("not exist")
-        )) {
-          return c.json({ 
-            error: `Asset '${assetId}' is not supported or doesn't exist in this wallet`,
-            status: 404 
-          }, 404);
+        if (error.message?.includes('not found')) {
+          return c.json({ error: 'Asset not found', status: 404 }, 404);
         }
-        
         const statusCode = error.status || 500;
-        return c.json({ 
-          error: error.message || 'Error processing asset', 
-          status: statusCode 
-        }, statusCode);
+        return c.json({ error: error.message, status: statusCode }, statusCode);
       }
     });
-    
     return app;
   });
 
-// Get supported assets handler - không cần cryptoMarketData
 const handleSupportedAssets = ({ app, fireblocks }: Omit<AppEnv, 'cryptoMarketData'>) => 
   Effect.sync(() => {
     app.get('/api/supported-assets', async (c) => {
+      console.info({ level: 'info', message: 'Handling /api/supported-assets request' });
+      
       try {
         const assetsResponse = await fireblocks.client.blockchainsAssets.getSupportedAssets();
-        console.log("Raw supported assets response:", 
-          typeof assetsResponse, 
-          Array.isArray(assetsResponse), 
-          JSON.stringify(assetsResponse).substring(0, 500)
-        );
+        console.debug({ level: 'debug', message: 'Supported assets response', data: assetsResponse });
         
-        if (!assetsResponse) {
-          return c.json([]);
-        }
-        
-        // Extract assets array from response
         let assets = [];
-        
         if (Array.isArray(assetsResponse)) {
           assets = assetsResponse;
-        } else if (assetsResponse && typeof assetsResponse === 'object') {
-          if (assetsResponse.data && Array.isArray(assetsResponse.data)) {
-            assets = assetsResponse.data;
-          } else if (assetsResponse.assets && Array.isArray(assetsResponse.assets)) {
-            assets = assetsResponse.assets;
-          } else if (assetsResponse.supportedAssets && Array.isArray(assetsResponse.supportedAssets)) {
-            assets = assetsResponse.supportedAssets;
-          } else {
-            // Return raw response if structure is unknown
-            return c.json(assetsResponse);
-          }
+        } else if (assetsResponse?.data) {
+          assets = assetsResponse.data;
         }
         
-        if (assets.length === 0) {
-          return c.json([]);
-        }
-        
-        // Filter valid assets and return them directly
-        const validAssets = assets.filter(asset => asset && typeof asset === 'object' && asset.id);
-        return c.json(validAssets);
-        
+        return c.json(assets);
       } catch (error) {
-        console.error('Error fetching supported assets:', error);
+        console.error({
+          level: 'error',
+          message: 'Error in /api/supported-assets',
+          error: error.message,
+          stack: error.stack
+        });
         const statusCode = error.status || 500;
-        return c.json({ 
-          error: error.message || 'Error fetching supported assets', 
-          status: statusCode 
-        }, statusCode);
+        return c.json({ error: error.message, status: statusCode }, statusCode);
       }
     });
-    
     return app;
   });
 
-// Get transactions handler
 const handleTransactions = ({ app, fireblocks }: Omit<AppEnv, 'cryptoMarketData'>) => 
   Effect.sync(() => {
     app.get('/api/transactions', async (c) => {
+      console.info({ level: 'info', message: 'Handling /api/transactions request' });
+      
       try {
         const transactions = await fireblocks.client.transactions.getTransactions({});
         return c.json(transactions);
       } catch (error) {
-        console.error('Error fetching transactions:', error);
+        console.error({
+          level: 'error',
+          message: 'Error in /api/transactions',
+          error: error.message,
+          stack: error.stack
+        });
         const statusCode = error.status || 500;
-        return c.json({ 
-          error: error.message || 'Error fetching transactions', 
-          status: statusCode 
-        }, statusCode);
+        return c.json({ error: error.message, status: statusCode }, statusCode);
       }
     });
-    
     return app;
   });
 
 // =====================
-// App Setup
+// Application Setup
 // =====================
-// Compose all route handlers using pipe
+const createAppEnv = Effect.gen(function* (_) {
+  const config = yield* getConfig;
+  const privateKey = yield* readPrivateKey(config.secretPath);
+  const fireblocks = yield* createFireblocksService(config, privateKey);
+  const cryptoMarketData = yield* createCryptoMarketDataService(config);
+  const app = yield* createApp;
+  return { fireblocks, cryptoMarketData, app };
+});
+
 const setupApp = pipe(
   createAppEnv,
   Effect.flatMap(env => 
@@ -659,7 +529,12 @@ const setupApp = pipe(
     )
   ),
   Effect.catchAll(error => {
-    console.error('Application setup failed:', error);
+    console.error({ 
+      level: 'fatal',
+      message: 'Application setup failed',
+      error: error.message,
+      stack: error.stack
+    });
     return Effect.sync(() => {
       const fallbackApp = new Hono();
       fallbackApp.all('*', (c) => c.json({ 
@@ -674,33 +549,40 @@ const setupApp = pipe(
 // =====================
 // Application Startup
 // =====================
-// Run the main effect to start the server
 const port = Number(process.env.PORT) || 3000;
 
-// Export for Bun
+Effect.runPromise(setupApp).then(app => {
+  console.info({
+    level: 'info',
+    message: 'Server started successfully',
+    port: port,
+    timestamp: new Date().toISOString()
+  });
+}).catch(error => {
+  console.error({
+    level: 'fatal',
+    message: 'Server startup failed',
+    error: error.message,
+    stack: error.stack
+  });
+  process.exit(1);
+});
+
 export default {
   port,
   fetch: async (request: Request) => {
     try {
-      // We create a static app instance to avoid recreating it on every request
       const app = await Effect.runPromise(setupApp);
       return app.fetch(request);
     } catch (error) {
-      console.error("Error handling request:", error);
+      console.error({ 
+        level: 'error',
+        message: 'Request handling failed',
+        error: error.message,
+        stack: error.stack
+      });
       const fallbackApp = new Hono();
-      fallbackApp.all('*', (c) => c.json({ 
-        error: 'Server error', 
-        status: 500 
-      }, 500));
       return fallbackApp.fetch(request);
     }
   }
 };
-
-// Start the server
-Effect.runPromise(setupApp).then(app => {
-  console.log(`Server running on http://localhost:${port}`);
-}).catch(error => {
-  console.error('Failed to start server:', error);
-  process.exit(1);
-});
