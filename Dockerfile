@@ -10,10 +10,10 @@ RUN bun install
 COPY . .
 
 # Build the application
-RUN bun run build
+# RUN bun run dev
 
 # Expose the port
 EXPOSE 3000
 
 # Start the application
-CMD ["bun", "run", "start"]
+CMD ["bun", "run", "dev"]
