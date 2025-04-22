@@ -28,6 +28,9 @@ run_curl_tests() {
     
     echo "\n6. Test Get Transactions"
     curl -s http://localhost:3000/api/transactions | jq
+
+    echo "\n6. Test Get Specific Transaction"
+    curl -s http://localhost:3000/api/transactions/376e73a3-3bae-4bae-bb2f-ac56fce740d0 | jq
 }
 
 run_curl_tests

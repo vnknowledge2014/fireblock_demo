@@ -502,6 +502,37 @@ const handleTransactions = ({ app, fireblocks }: Omit<AppEnv, 'cryptoMarketData'
     return app;
   });
 
+  const handleTransactionById = ({ app, fireblocks }: Omit<AppEnv, 'cryptoMarketData'>) => 
+    Effect.sync(() => {
+      app.get('/api/transactions/:txId', async (c) => {
+        const txId = c.req.param('txId');
+        console.info({ level: 'info', message: `Handling /api/transactions/${txId} request` });
+        
+        if (!txId) {
+          return c.json({ error: 'Transaction ID is required', status: 400 }, 400);
+        }
+        
+        try {
+          const transaction = await fireblocks.client.transactions.getTransaction({ txId });
+          return c.json(transaction);
+        } catch (error) {
+          console.error({
+            level: 'error',
+            message: `Error in /api/transactions/${txId}`,
+            error: error.message,
+            stack: error.stack
+          });
+          
+          if (error.message?.includes('not found')) {
+            return c.json({ error: 'Transaction not found', status: 404 }, 404);
+          }
+          const statusCode = error.status || 500;
+          return c.json({ error: error.message, status: statusCode }, statusCode);
+        }
+      });
+      return app;
+    });
+
 // =====================
 // Application Setup
 // =====================
@@ -525,6 +556,7 @@ const setupApp = pipe(
       Effect.flatMap(() => handleVaultAssets(env)),
       Effect.flatMap(() => handleSupportedAssets({ app: env.app, fireblocks: env.fireblocks })),
       Effect.flatMap(() => handleTransactions({ app: env.app, fireblocks: env.fireblocks })),
+      Effect.flatMap(() => handleTransactionById({ app: env.app, fireblocks: env.fireblocks })),
       Effect.map(() => env.app)
     )
   ),
